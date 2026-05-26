@@ -6,9 +6,13 @@ from typing import IO, Any, BinaryIO
 
 import numpy.typing as npt
 import torch
+from einops import rearrange, einsum
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
+from cs336_basics.transformer import utils, rope, attention
+from tests.conftest import vocab_size
+from cs336_basics import bpe, tokenizer
 
 def run_linear(
     d_in: int,
@@ -16,6 +20,12 @@ def run_linear(
     weights: Float[Tensor, " d_out d_in"],
     in_features: Float[Tensor, " ... d_in"],
 ) -> Float[Tensor, " ... d_out"]:
+
+    layer = utils.Linear(d_in, d_out)
+    layer.load_state_dict({"weight": weights})
+
+    return layer(in_features)
+
     """
     Given the weights of a Linear layer, compute the transformation of a batched input.
 
@@ -36,8 +46,13 @@ def run_embedding(
     vocab_size: int,
     d_model: int,
     weights: Float[Tensor, " vocab_size d_model"],
-    token_ids: Int[Tensor, " ..."],
+    token_ids: Int[Tensor, "..."],
 ) -> Float[Tensor, " ... d_model"]:
+
+    embed = utils.Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
+    embed.load_state_dict({"weight": weights})
+
+    return embed(token_ids)
     """
     Given the weights of an Embedding layer, get the embeddings for a batch of token ids.
 
@@ -62,6 +77,13 @@ def run_swiglu(
     w3_weight: Float[Tensor, " d_ff d_model"],
     in_features: Float[Tensor, " ... d_model"],
 ) -> Float[Tensor, " ... d_model"]:
+
+    swiglu = utils.SwiGLU(d_model)
+    swiglu.W1.weight.data = w1_weight
+    swiglu.W2.weight.data = w2_weight
+    swiglu.W3.weight.data = w3_weight
+    return swiglu(in_features)
+
     """Given the weights of a SwiGLU network, return
     the output of your implementation with these weights.
 
@@ -92,6 +114,16 @@ def run_scaled_dot_product_attention(
     V: Float[Tensor, " ... keys d_v"],
     mask: Bool[Tensor, " ... queries keys"] | None = None,
 ) -> Float[Tensor, " ... queries d_v"]:
+
+    d_k = Q.size(-1)
+    score = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")
+    score = score/(d_k**0.5)
+    if mask is not None:
+        score = score.masked_fill_(~mask, -float("inf"))
+    attention_weights = utils.softmax(x = score, dim=-1)
+    output = einsum(attention_weights, V, "... queries keys, ... keys d_v -> ... queries d_v")
+    return output
+
     """
     Given key (K), query (Q), and value (V) tensors, return
     the output of your scaled dot product attention implementation.
@@ -116,6 +148,15 @@ def run_multihead_self_attention(
     o_proj_weight: Float[Tensor, " d_model d_model"],
     in_features: Float[Tensor, " ... sequence_length d_model"],
 ) -> Float[Tensor, " ... sequence_length d_model"]:
+
+    mha = attention.MultiheadSelfAttention(d_model=d_model, num_heads=num_heads)
+    mha.load_state_dict({"q_proj_weight.weight": q_proj_weight,
+                         "k_proj_weight.weight": k_proj_weight,
+                         "v_proj_weight.weight": v_proj_weight,
+                         "o_proj_weight.weight": o_proj_weight,})
+    return mha(in_features)
+
+
     """
     Given the key, query, and value projection weights of a naive unbatched
     implementation of multi-head attention, return the output of an optimized batched
@@ -153,6 +194,15 @@ def run_multihead_self_attention_with_rope(
     in_features: Float[Tensor, " ... sequence_length d_model"],
     token_positions: Int[Tensor, " ... sequence_length"] | None = None,
 ) -> Float[Tensor, " ... sequence_length d_model"]:
+
+    mha = attention.MultiheadSelfAttention(d_model=d_model, num_heads=num_heads, rope=True, theta=theta, max_seq_len=max_seq_len)
+    mha.load_state_dict({"q_proj_weight.weight": q_proj_weight,
+                         "k_proj_weight.weight": k_proj_weight,
+                         "v_proj_weight.weight": v_proj_weight,
+                         "o_proj_weight.weight": o_proj_weight,})
+    return mha(in_features)
+
+
     """
     Given the key, query, and value projection weights of a naive unbatched
     implementation of multi-head attention, return the output of an optimized batched
@@ -188,6 +238,10 @@ def run_rope(
     in_query_or_key: Float[Tensor, " ... sequence_length d_k"],
     token_positions: Int[Tensor, " ... sequence_length"],
 ) -> Float[Tensor, " ... sequence_length d_k"]:
+
+    rope_mod = rope.RotaryPositionalEmbedding(theta=theta, d_k=d_k, max_seq_len=max_seq_len)
+    return rope_mod(x=in_query_or_key, token_positions=token_positions)
+
     """
     Run RoPE for a given input tensor.
 
@@ -361,9 +415,15 @@ def run_transformer_lm(
 def run_rmsnorm(
     d_model: int,
     eps: float,
-    weights: Float[Tensor, " d_model"],
+    weights: Float[Tensor, "d_model"],
     in_features: Float[Tensor, " ... d_model"],
 ) -> Float[Tensor, " ... d_model"]:
+
+    rms = utils.RMSNorm(d_model=d_model, eps=eps)
+    rms.load_state_dict({"weight": weights})
+
+    return rms(in_features)
+
     """Given the weights of a RMSNorm affine transform,
     return the output of running RMSNorm on the input features.
 
@@ -381,7 +441,7 @@ def run_rmsnorm(
     raise NotImplementedError
 
 
-def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
+def run_silu(in_features: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
     """Given a tensor of inputs, return the output of applying SiLU
     to each element.
 
@@ -418,7 +478,8 @@ def run_get_batch(
     raise NotImplementedError
 
 
-def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
+def run_softmax(in_features: Float[Tensor, "..."], dim: int) -> Float[Tensor, "..."]:
+    return utils.softmax(in_features, dim=dim)
     """
     Given a tensor of inputs, return the output of softmaxing the given `dim`
     of the input.
@@ -435,7 +496,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
 
 
 def run_cross_entropy(
-    inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
+    inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, "batch_size"]
 ) -> Float[Tensor, ""]:
     """Given a tensor of inputs and targets, compute the average cross-entropy
     loss across examples.
@@ -544,6 +605,9 @@ def get_tokenizer(
     merges: list[tuple[bytes, bytes]],
     special_tokens: list[str] | None = None,
 ) -> Any:
+
+    return tokenizer.Tokenizer(vocab=vocab, merges=merges, special_tokens=special_tokens)
+
     """Given a vocabulary, a list of merges, and a list of special tokens,
     return a BPE tokenizer that uses the provided vocab, merges, and special tokens.
 
@@ -568,6 +632,11 @@ def run_train_bpe(
     special_tokens: list[str],
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+
+    Tokenizer = bpe.BPE(input_path = input_path, vocab_size = vocab_size)
+    vocab, merges = Tokenizer.train()
+    return (vocab, merges)
+
     """Given the path to an input corpus, run train a BPE tokenizer and
     output its vocabulary and merges.
 

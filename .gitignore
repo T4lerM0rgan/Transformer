@@ -161,3 +161,8 @@ cython_debug/
 
 .ruff_cache/
 *.zip
+data/
+.idea/
+vocab_merge/
+cs336_basics/vocab_merge/
+

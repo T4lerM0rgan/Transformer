@@ -50,41 +50,22 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
-def process_file(
-        chunk: str,
-        special_tokens: list[str],
-):
-    pretokens = pretokenize(chunk, special_tokens)
-    counts = {}
-    for batch in pretokens:
-        for item in batch:
-            counts[item] = counts.get(item, 0) + 1
-    return counts
-
-
 
 def pretokenize(
-        text: str,
-        special_tokens: list[str],
+        input_path,
+        start,
+        end,
+        PAT
 ):
-    PAT = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
-    special_tokens = [re.escape(i) for i in special_tokens]
-    rm_st = re.split("|".join(special_tokens), text)
-    matches = []
-    pretokens = []
-    for text in rm_st:
-        matches.append(re.finditer(PAT, text))
-        pretokens.append([i.group().encode("utf-8") for j in matches for i in j])
-    return pretokens
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode()
+    special_tokens = [re.escape(i) for i in ["<|endoftext|>"]]
+    counts = {}
+    rm_st = re.split("|".join(special_tokens), chunk)
+    for sequence in rm_st:
+        for i in re.finditer(PAT, sequence):
+            pretoken = tuple(i.group().encode("utf-8"))
+            counts[pretoken] = counts.get(pretoken, 0) + 1
+    return counts
 
-# ## Usage
-# with open(..., "rb") as f:
-#     num_processes = 4
-#     boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
-#
-#     # The following is a serial implementation, but you can parallelize this
-#     # by sending each start/end pair to a set of processes.
-#     for start, end in zip(boundaries[:-1], boundaries[1:]):
-#         f.seek(start)
-#         chunk = f.read(end - start).decode("utf-8", errors="ignore")
-#         # Run pre-tokenization on your chunk and store the counts for each pre-token

@@ -10,7 +10,7 @@ from einops import rearrange, einsum
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from cs336_basics.transformer import utils, rope, attention
+from cs336_basics.transformer import utils, rope, attention, transformer
 from tests.conftest import vocab_size
 from cs336_basics import bpe, tokenizer
 
@@ -266,6 +266,11 @@ def run_transformer_block(
     weights: dict[str, Tensor],
     in_features: Float[Tensor, " batch sequence_length d_model"],
 ) -> Float[Tensor, " batch sequence_length d_model"]:
+
+    transformer_block = transformer.TransformerBlock(d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_seq_len=max_seq_len, theta=theta)
+    transformer_block.load_state_dict(weights)
+    return transformer_block(in_features)
+
     """
     Given the weights of a pre-norm Transformer block and input features,
     return the output of running the Transformer block on the input features.

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import numpy.typing as npt
 import torch
 from torch import Tensor
 from jaxtyping import Bool, Float, Int
@@ -72,21 +71,24 @@ class RMSNorm(torch.nn.Module):
         return result.to(in_dtype)
 
 class SwiGLU(torch.nn.Module):
-    def __init__(self, d_model: int, device: torch.device = None, dtype: torch.dtype = None, *args: Any, **kwargs: Any):
+    def __init__(self, d_model: int, d_ff: int | None = None, device: torch.device = None, dtype: torch.dtype = None, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self.d_model = d_model
-        self.d_ff = d_model * 8 // 3
+        if d_ff is None:
+            self.d_ff = d_model * 8 // 3
+        else:
+            self.d_ff = d_ff
         self.device = device
         self.dtype = dtype
-        self.W1 = Linear(self.d_model, self.d_ff, device=device, dtype=dtype)
-        self.W2 = Linear(self.d_ff, self.d_model, device=device, dtype=dtype)
-        self.W3 = Linear(self.d_model, self.d_ff, device=device, dtype=dtype)
+        self.w1 = Linear(self.d_model, self.d_ff, device=device, dtype=dtype)
+        self.w2 = Linear(self.d_ff, self.d_model, device=device, dtype=dtype)
+        self.w3 = Linear(self.d_model, self.d_ff, device=device, dtype=dtype)
 
     def silu(self, x: Float[Tensor, "... d_ff"]) -> Float[Tensor, "... d_ff"]:
         return x * torch.sigmoid(x)
 
     def forward(self, x: Float[Tensor, "... d_model"]) -> Float[Tensor, "... d_model"]:
-        return self.W2((self.silu(self.W1(x)) * self.W3(x)))
+        return self.w2((self.silu(self.w1(x)) * self.w3(x)))
 
 def softmax(x: Float[Tensor, "... d_m"], dim:int) -> Float[Tensor, "... d_m"]:
     m = torch.amax(input=x, dim=dim, keepdim=True)

@@ -79,9 +79,9 @@ def run_swiglu(
 ) -> Float[Tensor, " ... d_model"]:
 
     swiglu = utils.SwiGLU(d_model)
-    swiglu.W1.weight.data = w1_weight
-    swiglu.W2.weight.data = w2_weight
-    swiglu.W3.weight.data = w3_weight
+    swiglu.w1.weight.data = w1_weight
+    swiglu.w2.weight.data = w2_weight
+    swiglu.w3.weight.data = w3_weight
     return swiglu(in_features)
 
     """Given the weights of a SwiGLU network, return
@@ -150,10 +150,10 @@ def run_multihead_self_attention(
 ) -> Float[Tensor, " ... sequence_length d_model"]:
 
     mha = attention.MultiheadSelfAttention(d_model=d_model, num_heads=num_heads)
-    mha.load_state_dict({"q_proj_weight.weight": q_proj_weight,
-                         "k_proj_weight.weight": k_proj_weight,
-                         "v_proj_weight.weight": v_proj_weight,
-                         "o_proj_weight.weight": o_proj_weight,})
+    mha.load_state_dict({"q_proj.weight": q_proj_weight,
+                         "k_proj.weight": k_proj_weight,
+                         "v_proj.weight": v_proj_weight,
+                         "output_proj.weight": o_proj_weight,})
     return mha(in_features)
 
 
@@ -196,10 +196,10 @@ def run_multihead_self_attention_with_rope(
 ) -> Float[Tensor, " ... sequence_length d_model"]:
 
     mha = attention.MultiheadSelfAttention(d_model=d_model, num_heads=num_heads, rope=True, theta=theta, max_seq_len=max_seq_len)
-    mha.load_state_dict({"q_proj_weight.weight": q_proj_weight,
-                         "k_proj_weight.weight": k_proj_weight,
-                         "v_proj_weight.weight": v_proj_weight,
-                         "o_proj_weight.weight": o_proj_weight,})
+    mha.load_state_dict({"q_proj.weight": q_proj_weight,
+                         "k_proj.weight": k_proj_weight,
+                         "v_proj.weight": v_proj_weight,
+                         "output_proj.weight": o_proj_weight, })
     return mha(in_features)
 
 
@@ -346,6 +346,17 @@ def run_transformer_lm(
     weights: dict[str, Tensor],
     in_indices: Int[Tensor, " batch_size sequence_length"],
 ) -> Float[Tensor, " batch_size sequence_length vocab_size"]:
+
+    transfromer_lm = transformer.TransformerLM(vocab_size=vocab_size,
+                                               context_length=context_length,
+                                               d_model=d_model,
+                                               num_layers=num_layers,
+                                               num_heads=num_heads,
+                                               d_ff=d_ff,
+                                               rope_theta=rope_theta)
+    transfromer_lm.load_state_dict(weights)
+    return transfromer_lm(in_indices)
+
     """Given the weights of a Transformer language model and input indices,
     return the output of running a forward pass on the input indices.
 

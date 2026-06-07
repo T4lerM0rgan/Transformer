@@ -26,7 +26,6 @@ def run_linear(
 
     return layer(in_features)
 
-
     """
     Given the weights of a Linear layer, compute the transformation of a batched input.
 

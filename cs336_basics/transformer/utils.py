@@ -13,16 +13,11 @@ class Linear(torch.nn.Module):
     def __init__(self, in_features: int, out_features: int, device: torch.device = None, dtype: torch.dtype = None, *args: Any,
                  **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.in_features = in_features
-        self.out_features = out_features
-        self.device = device
-        self.dtype = dtype
 
-        weight: Tensor = torch.empty(self.out_features, self.in_features, device=self.device, dtype=self.dtype)
+        weight: Tensor = torch.empty(out_features, in_features, device=device, dtype=dtype)
         mean: float = 0
-        var: float = 2 / (self.out_features + self.in_features)
-        std: float = var ** 0.5
-        weight = torch.nn.init.trunc_normal_(tensor=weight, mean=mean, std=std, a=-3 * std, b=3 * std)
+        std: float = (2 / (out_features + in_features)) ** 0.5
+        weight = torch.nn.init.trunc_normal_(tensor=weight, mean=mean, std=std, a= -3 * std, b= 3 * std)
         self.weight: Float[Tensor, "out_features in_features"] = torch.nn.Parameter(weight)
 
     def forward(self, x: Float[Tensor, "batch ... in_features"]) -> Float[Tensor, "batch ... out_features"]:

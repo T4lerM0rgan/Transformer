@@ -10,6 +10,8 @@ class MaxHeap:
 
     def get_parent(self, i): return (i - 1) // 2
 
+    def size(self): return len(self.heap)
+
     @property
     def get_root(self):
         return self.heap[0] if self.heap else None

@@ -4,6 +4,8 @@ import os
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
 
+import math
+import numpy as np
 import numpy.typing as npt
 import torch
 from einops import rearrange, einsum
@@ -11,8 +13,10 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
 from cs336_basics.transformer import utils, rope, attention, transformer
-from tests.conftest import vocab_size
+from cs336_basics.transformer.Optimizers import AdamW
+from tests.conftest import vocab_size, d_ff
 from cs336_basics import bpe, tokenizer
+
 
 def run_linear(
     d_in: int,
@@ -458,6 +462,9 @@ def run_rmsnorm(
 
 
 def run_silu(in_features: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
+
+    return in_features * torch.sigmoid(in_features)
+
     """Given a tensor of inputs, return the output of applying SiLU
     to each element.
 
@@ -474,6 +481,20 @@ def run_silu(in_features: Float[Tensor, "..."]) -> Float[Tensor, "..."]:
 def run_get_batch(
     dataset: npt.NDArray, batch_size: int, context_length: int, device: str
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    max_start = len(dataset) - context_length
+
+    start_indices = np.random.randint(low=0, high=max_start, size=(batch_size, ))
+    offsets = np.arange(context_length)
+    indices = start_indices[:, None] + offsets[None, :]
+
+    x = dataset[indices]
+    y = dataset[indices + 1]
+
+    x = torch.from_numpy(np.asarray(x, dtype=np.int64)).to(device)
+    y = torch.from_numpy(np.asarray(y, dtype=np.int64)).to(device)
+
+    return x, y
+
     """
     Given a dataset (a 1D numpy array of integers) and a desired batch size and
     context length, sample language modeling input sequences and their corresponding
@@ -512,8 +533,19 @@ def run_softmax(in_features: Float[Tensor, "..."], dim: int) -> Float[Tensor, ".
 
 
 def run_cross_entropy(
-    inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, "batch_size"]
+    inputs: Float[Tensor, " ... vocab_size"],
+    targets: Int[Tensor, "..."]
 ) -> Float[Tensor, ""]:
+
+    targets = targets.unsqueeze(-1) # bring the dim of targets to the dim of inputs
+    m = torch.amax(input=inputs, dim=-1, keepdim=True)
+    shifted = inputs - m
+    log_sum_exp = torch.log(torch.sum(torch.exp(shifted), dim=-1, keepdim=True)) # optimized log softmax
+    target_logits = torch.gather(input=shifted, dim=-1, index=targets)
+    loss = log_sum_exp - target_logits
+    return torch.mean(loss)
+
+
     """Given a tensor of inputs and targets, compute the average cross-entropy
     loss across examples.
 
@@ -530,6 +562,31 @@ def run_cross_entropy(
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
+
+    params = list(parameters)
+    eps = 1e-6
+    total_norm_squared = 0.0
+
+    for p in params:
+        if p.grad is None:
+            continue
+
+        grad = p.grad.detach()
+        total_norm_squared += torch.sum(grad.float() ** 2).item()
+
+    total_norm = total_norm_squared ** 0.5
+
+    if total_norm <= max_l2_norm:
+        return
+
+    clip_coef = max_l2_norm / (total_norm + eps)
+
+    for p in params:
+        if p.grad is None:
+            continue
+
+        p.grad.mul_(clip_coef)
+
     """Given a set of parameters, clip their combined gradients to have l2 norm at most max_l2_norm.
 
     Args:
@@ -538,13 +595,12 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    raise NotImplementedError
 
 
 def get_adamw_cls() -> Any:
-    """
-    Returns a torch.optim.Optimizer that implements AdamW.
-    """
+    from cs336_basics.transformer.Optimizers.AdamW import AdamW
+    return AdamW
+
     raise NotImplementedError
 
 
@@ -555,6 +611,13 @@ def run_get_lr_cosine_schedule(
     warmup_iters: int,
     cosine_cycle_iters: int,
 ):
+    if it<warmup_iters:
+        return max_learning_rate * it / warmup_iters
+    elif it <= cosine_cycle_iters:
+        return min_learning_rate + 0.5 * (1 + math.cos(math.pi * (it - warmup_iters) / (cosine_cycle_iters - warmup_iters))) * (max_learning_rate - min_learning_rate)
+    else:
+        return min_learning_rate
+
     """
     Given the parameters of a cosine learning rate decay schedule (with linear
     warmup) and an iteration number, return the learning rate at the given
@@ -582,6 +645,15 @@ def run_save_checkpoint(
     iteration: int,
     out: str | os.PathLike | BinaryIO | IO[bytes],
 ):
+
+    checpoint = {
+        "model" : model.state_dict(),
+        "optimizer" : optimizer.state_dict(),
+        "iteration" : iteration
+    }
+
+    torch.save(checpoint, out)
+
     """
     Given a model, optimizer, and an iteration number, serialize them to disk.
 
@@ -592,7 +664,6 @@ def run_save_checkpoint(
             we've completed.
         out (str | os.PathLike | BinaryIO | IO[bytes]): Path or file-like object to serialize the model, optimizer, and iteration to.
     """
-    raise NotImplementedError
 
 
 def run_load_checkpoint(
@@ -600,6 +671,14 @@ def run_load_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
 ) -> int:
+
+    checkpoint = torch.load(src)
+
+    model.load_state_dict(checkpoint["model"])
+    optimizer.load_state_dict(checkpoint["optimizer"])
+
+    return checkpoint["iteration"]
+
     """
     Given a serialized checkpoint (path or file-like object), restore the
     serialized state to the given model and optimizer.
@@ -675,3 +754,6 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
     raise NotImplementedError
+
+if __name__ == "__main__":
+    pass

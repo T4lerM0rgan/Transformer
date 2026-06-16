@@ -2,33 +2,40 @@ from __future__ import annotations
 
 import time
 
+import os
+from pickle import HIGHEST_PROTOCOL
+
 from cs336_basics import pretokenization
-from cs336_basics import heap
-import regex as re
+from cs336_basics.heap import MaxHeap
 import concurrent.futures
-from collections import Counter
+from collections import Counter, defaultdict
 import resource
 import pickle
 from pathlib import Path
 
+from itertools import pairwise
+
 Token = int
 Bigram_Token = tuple[Token, Token]
 Sequence_Token = tuple[Token, ...]
+Seq_ID = int
 
 class BPE:
-    def __init__(self, input_path: str, vocab_size, special_tokens: list[str]=None, num_chunks: int=6):
+    def __init__(self, input_path: str, vocab_size, special_tokens: list[str]=None, num_chunks: int = 64):
         if special_tokens is None:
             special_tokens = ["<|endoftext|>"]
+        self.num_chunks = num_chunks
+        self.num_workers = min(num_chunks, (os.cpu_count() or 1))
         self.special_tokens: list[str] = special_tokens
         self.vocab_size: int = vocab_size
         self.input_path: str = input_path
-        self.num_chunks = num_chunks
-        self.heap = heap.MaxHeap()
-        self.PAT = re.compile(r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
+        self.heap = MaxHeap()
+        self.PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
-        self.seq_counts: dict[Sequence_Token, int] = {}
-        self.bigram_counts: dict[Bigram_Token, int] = {}
-        self.bigram_indexes: dict[Bigram_Token, set[Sequence_Token]] = {}
+        self.seq_ids: dict[Seq_ID, Sequence_Token] = {}
+        self.seq_counts: Counter[Seq_ID] = Counter()
+        self.bigram_counts: Counter[Bigram_Token] = Counter()
+        self.bigram_indexes: dict[Bigram_Token, set[Seq_ID]] = defaultdict(set)
 
         self.save_dir = Path("./vocab_merge")
         self.save_dir.mkdir(exist_ok=True, parents=True)
@@ -44,30 +51,52 @@ class BPE:
             self.vocab[len(self.vocab)] = j.encode("utf-8")
 
     def initial_sequence_count(self) -> None:
-        with open(self.input_path, "rb") as f:
-            boundaries = pretokenization.find_chunk_boundaries(f, self.num_chunks, self.special_tokens[0].encode("utf-8"))
-            args = [(self.input_path, start, end, self.PAT) for start, end in zip(boundaries[:-1], boundaries[1:])]
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            chunks_counts = executor.map(pretokenization.pretokenize, *zip(*args))
-        for chunk_counts in chunks_counts:
-            for seq, seq_freq in chunk_counts.items():
-                self.seq_counts[seq] = self.seq_counts.get(seq, 0) + seq_freq
+        seq_counter: Counter[Sequence_Token] = Counter()
 
+        with open(self.input_path, "rb") as f:
+            boundaries = pretokenization.find_chunk_boundaries(f,
+               self.num_chunks,
+               self.special_tokens[0].encode("utf-8"),
+            )
+            args = [
+                (self.input_path, start, end, self.PATTERN)
+                for start, end in pairwise(boundaries)
+            ]
+
+        with concurrent.futures.ProcessPoolExecutor(max_workers=self.num_workers) as executor:
+            for chunk_counts in executor.map(pretokenization.pretokenize, *zip(*args)):
+                seq_counter.update(chunk_counts)
+
+        for seq, freq in seq_counter.items():
+            seq_id = len(self.seq_ids)
+            self.seq_ids[seq_id] = seq
+            self.seq_counts[seq_id] = freq
 
     def initial_bigram_count(self) -> None:
         if not self.seq_counts:
             raise ValueError("self.seq_counts is empty. Call initial_sequence_count before initial_bigram_count")
-        for seq, seq_freq in self.seq_counts.items():
+
+        bigram_counts = self.bigram_counts
+        bigram_indexes = self.bigram_indexes
+
+        for seq_id, seq in self.seq_ids.items():
+
+            seq_freq = self.seq_counts[seq_id]
+
             if len(seq) < 2:
                 continue
-            for pair in zip(seq[:-1], seq[1:]):
-                self.bigram_counts[pair] = self.bigram_counts.get(pair, 0) + seq_freq
-                inner = self.bigram_indexes.setdefault(pair, set())
-                inner.add(seq)
+
+            for pair in pairwise(seq):
+                bigram_counts[pair] += seq_freq
+                bigram_indexes[pair].add(seq_id)
 
     def initialize_heap(self) -> None:
         for bigram, count in self.bigram_counts.items():
             self.heap.insert(count=count, token1=self.vocab[bigram[0]], token2=self.vocab[bigram[1]], bigram=bigram)
+
+    def rebuild_heap(self) -> None:
+        self.heap = MaxHeap()
+        self.initialize_heap()
 
     def find_max_bigram(self) -> Bigram_Token:
         max_bi = self.heap.extract_root()
@@ -78,15 +107,23 @@ class BPE:
     def merge_once(self) -> None:
         merge_bigram: tuple[Token, Token] = self.find_max_bigram()
         new_token = self.vocab[merge_bigram[0]] + self.vocab[merge_bigram[1]]
+
         token_id: int = len(self.vocab)
         self.vocab[token_id] = new_token
         self.merges.append((self.vocab[merge_bigram[0]], self.vocab[merge_bigram[1]]))
 
-        seqs =  self.bigram_indexes[merge_bigram].copy()
-        for old_seq in seqs:
+        seq_ids =  tuple(self.bigram_indexes[merge_bigram])
+
+        for seq_id in seq_ids:
+            if seq_id not in self.seq_counts:
+                continue
+
+            old_seq = self.seq_ids[seq_id]
+            seq_freq = self.seq_counts[seq_id]
+
             new_blist: list[Token] = []
             i = 0
-            seq_freq = self.seq_counts[old_seq]
+
             while i < len(old_seq):
                 if i < len(old_seq) - 1 and old_seq[i] == merge_bigram[0] and old_seq[i+1] == merge_bigram[1]:
                     new_blist.append(token_id)
@@ -96,55 +133,53 @@ class BPE:
                     i+=1
 
             new_seq = tuple(new_blist)
+
             if new_seq == old_seq:
                 continue
 
-            old_bi_count = Counter(zip(old_seq[:-1], old_seq[1:]))
-            new_bi_count = Counter(zip(new_blist[:-1], new_blist[1:]))
-            self.seq_counts[new_seq] = self.seq_counts.setdefault(new_seq, 0) + seq_freq
+            old_bi_count = Counter(pairwise(old_seq))
+            new_bi_count = Counter(pairwise(new_blist))
 
-            for pair in old_bi_count | new_bi_count:
-                diff = new_bi_count[pair] - old_bi_count[pair]
+            self.seq_ids[seq_id] = new_seq
 
-                if pair not in self.bigram_indexes:
-                    self.bigram_indexes[pair] = self.bigram_indexes.setdefault(pair, set())
-                if pair not in self.bigram_counts:
-                    self.bigram_counts[pair] = self.bigram_counts.setdefault(pair, 0)
+            for pair in old_bi_count.keys() | new_bi_count.keys():
 
-                if diff == 0:
-                    inner = self.bigram_indexes[pair]
-                    inner.discard(old_seq)
-                    inner.add(new_seq)
+                old_count = old_bi_count[pair]
+                new_count = new_bi_count[pair]
+                diff = new_count - old_count
 
-                elif diff < 0:
+                if diff!=0:
                     self.bigram_counts[pair] += diff * seq_freq
-                    self.heap.insert(count=self.bigram_counts[pair], token1=self.vocab[pair[0]], token2=self.vocab[pair[1]], bigram=pair)
+                    updated_count = self.bigram_counts[pair]
 
-                    inner = self.bigram_indexes[pair]
-                    inner.discard(old_seq)
+                    if updated_count > 0:
+                        self.heap.insert(
+                            count=updated_count,
+                            bigram=pair,
+                            token1=self.vocab[pair[0]],
+                            token2=self.vocab[pair[1]],
+                        )
+                    else:
+                        self.bigram_counts.pop(pair, None)
 
-                    if new_bi_count[pair] > 0:
-                        inner = self.bigram_indexes[pair]
-                        inner.add(new_seq)
+                if old_count > 0 and new_count == 0:
+                    self.bigram_indexes[pair].discard(seq_id)
 
-                else:
-                    self.bigram_counts[pair] += diff * seq_freq
-                    self.heap.insert(count=self.bigram_counts[pair], token1=self.vocab[pair[0]], token2=self.vocab[pair[1]], bigram=pair)
-                    inner = self.bigram_indexes[pair]
-                    inner.add(new_seq)
+                elif old_count == 0 and new_count > 0:
+                    self.bigram_indexes[pair].add(seq_id)
 
-                if self.bigram_counts[pair] <= 0:
-                    self.bigram_counts.pop(pair, None)
-                if not self.bigram_indexes[pair]:
-                    self.bigram_indexes.pop(pair, None)
-
-            self.seq_counts.pop(old_seq, None)
+            if self.heap.size() > 3 * len(self.bigram_counts):
+                self.rebuild_heap()
 
     def save(self):
         vocab_save = self.save_dir / self.vocab_name
         merges_save = self.save_dir / self.merges_name
-        vocab_save.write_bytes(pickle.dumps(self.vocab))
-        merges_save.write_bytes(pickle.dumps(self.merges))
+
+        with open(vocab_save, "wb") as f:
+            pickle.dump(self.vocab, f, protocol=HIGHEST_PROTOCOL)
+
+        with open(merges_save, "wb") as f:
+            pickle.dump(self.merges, f, protocol=HIGHEST_PROTOCOL)
 
     def train(self):
         self.initial_sequence_count()
